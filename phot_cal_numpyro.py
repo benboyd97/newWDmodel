@@ -9,7 +9,6 @@ from matplotlib.backends.backend_pdf import PdfPages
 import astropy.table as at
 from numpy.lib.recfunctions import append_fields
 from scipy.stats import linregress
-import pymc as pm
 import pandas as pd
 from collections import OrderedDict
 
@@ -19,8 +18,10 @@ import numpyro.distributions as dist
 from numpyro.diagnostics import hpdi
 from jax import random
 import jax
+import jax.numpy as jnp
 
-    
+numpyro.set_host_device_count(4)
+jax.config.update('jax_enable_x64',True)
 
 
 def get_data():
@@ -34,7 +35,7 @@ def get_data():
     marker    = ['o',      'd',     '*']       # markers to use for each standard in plots
     use_stars = ['GD-153', 'G191B2B', 'GD-71'] # what stars are to be used to get zeropoints
 
-    standard_mags_file = f'/data/bmb41/WD_data/photometry/20190215/calspec_standards_WFC3_UVIS2_IR_{magsys}.txt' # standard's apparent magnitudes in each band
+    standard_mags_file = f'/Users/bboyd/Documents/work/wd/WD_data/photometry/20190215/calspec_standards_WFC3_UVIS2_IR_{magsys}.txt' # standard's apparent magnitudes in each band
     smags = at.Table.read(standard_mags_file, format='ascii')
     smags = smags.to_pandas()
     smags.set_index('objID', inplace=True)
@@ -45,7 +46,7 @@ def get_data():
     drop_fields = ['X', 'Y', 'BCKGRMS', 'SKY', 'FITS-FILE']
 
     mag_table = OrderedDict() # stores combined magnitudes and zeropoints in each passband
-    all_mags   = at.Table.read('/data/bmb41/WD_data/photometry/20190215/src/AS/all+standardmeasures_C25_ILAPHv{}_AS.txt'.format(ilaph_version), format='ascii')
+    all_mags   = at.Table.read('/Users/bboyd/Documents/work/wd/WD_data/photometry/20190215/src/AS/all+standardmeasures_C25_ILAPHv{}_AS.txt'.format(ilaph_version), format='ascii')
     all_mags[ref] -= 30.
     mask = (all_mags[dref] < 0.5) & (np.abs(all_mags[ref]) < 50) & (all_mags['EXPTIME'] >= mintime)
     nbad = len(all_mags[~mask])
@@ -69,18 +70,57 @@ def get_data():
 
 
 
-def phot_cal_model(standard_mask,zpt_est):
-     
-     sig_int =  numpyro.sample("sig_int", dist.HalfCauchy(1))
-     zpt = numpyro.sample("zpt",dist.Normal(mu=zpt_est,sgima=1))
+def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=None,standard_mags=None,zpt_est=24,f160w=False):
+    sig_int =  numpyro.sample("sig_intrinsic", dist.HalfCauchy(1))
+    zpt = numpyro.sample("zeropoint",dist.Normal(loc=zpt_est,scale=1))
 
 
-     
+    if f160w != True:
+        nu = numpyro.sample("nu", dist.HalfCauchy(3))
 
-     mag_inst_i = mag_app_i[standard_idx] - zpt
+    
+
+    n_sample_obj= len(np.unique(sample_idx))
+
+    with numpyro.plate("plate_j", n_sample_obj):
+        mag_app_j = numpyro.sample("mag_app_j", dist.Uniform(8,25))
+        mag_inst_j = mag_app_j - zpt
+
+    
+    n_standard_obj= len(np.unique(standard_idx))
+
+    with numpyro.plate("plate_i", n_standard_obj):
+
+        mag_inst_i = mag_app_i - zpt
 
 
-     m_
+
+    n_sample_obs= len(sample_idx)
+
+    m_j = mag_inst_j[sample_idx]
+
+    
+    with numpyro.plate("data_j", n_sample_obs):
+        full_var_j = (sig_int**2. + sig_j**2.)**0.5
+        if f160w:
+            numpyro.sample("m_j", dist.Normal(loc=m_j,scale=full_var_j), obs=sample_mags)
+
+        else:
+            numpyro.sample("m_j", dist.StudentT(loc=m_j,df=nu,scale=full_var_j), obs=sample_mags)
+
+    n_standard_obs= len(standard_idx)
+
+    m_i = mag_inst_i[standard_idx]
+    with numpyro.plate("data_i", n_standard_obs):
+        full_var_i = (sig_int**2. + sig_i**2.)**0.5
+        if f160w:
+            numpyro.sample("m_i", dist.Normal(loc=m_i,scale=full_var_i), obs=standard_mags)
+
+        else:
+            numpyro.sample("m_i", dist.StudentT(loc=m_i,df=nu,scale=full_var_i), obs=standard_mags)
+
+
+
 
 
 
@@ -98,9 +138,20 @@ var_names = ['zeropoint', 'sig_intrinsic', 'nu']
 nvar = len(var_names)
 use_stars = ['GD-153', 'G191B2B', 'GD-71']
 ref = 'FMAG'  # which photometry package should be used to compute zeropoints
+dref = 'ERRMAG'
 
 
-print(mag_table)
+
+
+blank_table = at.Table(names=( 'obj_ID','F275W','dF275W','F336W','dF336W','F475W','dF475W','F625W','dF625W','F775W','dF775W','F160W','dF160W'),dtype=('S20','f8','f8','f8','f8','f8','f8','f8','f8','f8','f8','f8','f8'))
+
+blank_table.add_row({'obj_ID': 'zeropoint'})
+blank_table.add_row({'obj_ID': 'sig_intrinsic'})
+blank_table.add_row({'obj_ID': 'nu'})
+
+row_index =blank_table['obj_ID'] == 'nu'
+blank_table['F160W'][row_index]=np.nan
+blank_table['dF160W'][row_index]=np.nan
 
 
 for i, pb in enumerate(mag_table):
@@ -148,7 +199,65 @@ for i, pb in enumerate(mag_table):
         sample_mags['idx'] = sample_idx
         sample_idx = sample_mags['idx'].values
 
+   
 
+        nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
+        mcmc = MCMC(nuts_kernel, num_samples=80000, num_warmup=40000,num_chains=4)
+        rng_key = random.PRNGKey(0)
+
+        if pb == 'F160W':
+            print(standard_mags[dref])
+            print(sample_mags[dref])
+            mcmc.run(rng_key,jnp.asarray(sample_idx),jnp.asarray(standard_idx),mag_app_i=jnp.asarray(mag_app_i[standard_idx]),sig_i=jnp.asarray(standard_mags[dref]),sig_j=jnp.asarray(sample_mags[dref]),sample_mags=jnp.asarray(sample_mags[ref]),standard_mags=jnp.asarray(standard_mags[ref]),zpt_est=zpt_est,f160w=True)
+
+        else:
+            mcmc.run(rng_key,jnp.asarray(sample_idx),jnp.asarray(standard_idx),mag_app_i=jnp.asarray(mag_app_i[standard_idx]),sig_i=jnp.asarray(standard_mags[dref]),sig_j=jnp.asarray(sample_mags[dref]),sample_mags=jnp.asarray(sample_mags[ref]),standard_mags=jnp.asarray(standard_mags[ref]),zpt_est=zpt_est,f160w=False)
+
+        mcmc.print_summary()
+        samps=mcmc.get_samples()
+
+
+        keys = samps.keys()
+
+        print(keys)
+
+        for key in keys:
+
+            shape = samps[key].shape
+            if len(shape)>1:
+                for i in range(shape[1]):
+
+                    star_name=index_sample[i]
+                    if star_name[0]=='W':
+                        star_name=star_name[:star_name.rfind('-')]
+
+                    star_name = star_name.replace('-', '').lower()
+                    if star_name.rfind('.') !=-1:
+                        star_name=star_name[:star_name.rfind('.')]
+                    
+
+                    if star_name not in list(blank_table['obj_ID']):
+                        blank_table.add_row({'obj_ID': star_name})
+
+                    row_index =blank_table['obj_ID'] == star_name
+                    blank_table[pb][row_index] = np.mean(samps[key][:,i])
+                    blank_table['d'+pb][row_index] = np.std(samps[key][:,i])
+
+            else:
+                row_index =blank_table['obj_ID'] == key
+                blank_table[pb][row_index] = np.mean(samps[key])
+                blank_table['d'+pb][row_index] = np.std(samps[key])
+            
+
+cols = blank_table.colnames
+for c in cols:
+    if blank_table[c].dtype == np.float64:
+        blank_table[c].format = '%.6f'
+
+
+
+
+blank_table.write('new_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
 
 
 
