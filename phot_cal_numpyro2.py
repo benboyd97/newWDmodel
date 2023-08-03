@@ -19,6 +19,7 @@ from numpyro.diagnostics import hpdi
 from jax import random
 import jax
 import jax.numpy as jnp
+from numpyro.infer import init_to_median, init_to_sample
 
 numpyro.set_host_device_count(4)
 jax.config.update('jax_enable_x64',True)
@@ -201,10 +202,12 @@ for i, pb in enumerate(mag_table):
         sample_idx = sample_mags['idx'].values
 
 
-
-        nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
-        mcmc = MCMC(nuts_kernel, num_samples=40000, num_warmup=20000,num_chains=4)
+        init_strategy=init_to_sample()
+        nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True,init_strategy=init_strategy)
+        mcmc = MCMC(nuts_kernel, num_samples=5000, num_warmup=5000,num_chains=4)
         rng_key = random.PRNGKey(0)
+
+        
 
 
         if pb == 'F160W':
