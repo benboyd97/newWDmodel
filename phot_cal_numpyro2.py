@@ -19,7 +19,6 @@ from numpyro.diagnostics import hpdi
 from jax import random
 import jax
 import jax.numpy as jnp
-from numpyro.infer import init_to_median, init_to_sample
 
 numpyro.set_host_device_count(4)
 jax.config.update('jax_enable_x64',True)
@@ -72,56 +71,58 @@ def get_data():
 
 
 def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=None,standard_mags=None,zpt_est=24,f160w=False):
-    sig_int =  numpyro.sample("sig_intrinsic", dist.HalfCauchy(1))
-    zpt = numpyro.sample("zeropoint",dist.Normal(loc=zpt_est,scale=1))
+    
+    
+    n_bands= mag_app_i.shape[0]
 
 
-    if f160w != True:
-        nu = numpyro.sample("nu", dist.HalfCauchy(3))
+    with numpyro.plate("plate_b", n_bands):
+
+        sig_int_b =  numpyro.sample("sig_intrinsic", dist.HalfCauchy(1))
+        zpt_b = numpyro.sample("zeropoint",dist.Normal(loc=zpt_est,scale=1))
+        nu_b = numpyro.sample("nu", dist.HalfCauchy(3))
 
     
-
     n_sample_obj= len(np.unique(sample_idx))
 
-    with numpyro.plate("plate_j", n_sample_obj):
-        mag_app_j = numpyro.sample("mag_app_j", dist.Uniform(8,25))
-        mag_inst_j = mag_app_j - zpt
 
-    
+    with numpyro.plate("plate_j", n_sample_obj*n_bands):
+        mag_app_j = numpyro.sample("mag_app_j", dist.Uniform(8,25)).reshape(n_bands,n_sample_obj)
+        mag_inst_j = mag_app_j - zpt_b.reshape(n_bands,1)
+
+
     n_standard_obj= len(np.unique(standard_idx))
 
     with numpyro.plate("plate_i", n_standard_obj):
 
-        mag_inst_i = mag_app_i - zpt
+        mag_inst_i = mag_app_i - zpt_b.reshape(n_bands,1)
+
+
+    n_sample_obs= sample_mags.shape[1]
 
 
 
-    n_sample_obs= len(sample_idx)
+    m_j = mag_inst_j[jnp.arange(n_bands).astype(int)[:,None], sample_idx]
+    mask = sample_idx!=1000
+    with numpyro.plate("data_j", n_sample_obs):
+        full_var_j = (sig_int_b.reshape(n_bands,1)**2.+sig_j**2.)**0.5
 
-    m_j = mag_inst_j[sample_idx]
+        with numpyro.handlers.mask(mask=mask):
+            numpyro.sample("m_j", dist.StudentT(loc=m_j,df=nu_b.reshape(n_bands,1),scale=full_var_j), obs=sample_mags)
+
+    n_standard_obs= standard_mags.shape[1]
+
+    m_i = mag_inst_i[jnp.arange(n_bands).astype(int)[:,None], standard_idx]
+
+
+    mask = standard_idx!=1000
+    with numpyro.plate("data_i", n_standard_obs):
+        full_var_i = (sig_int_b.reshape(n_bands,1)**2. + sig_i**2.)**0.5
+        with numpyro.handlers.mask(mask=mask):
+            numpyro.sample("m_i", dist.StudentT(loc=m_i,df=nu_b.reshape(n_bands,1),scale=full_var_i), obs=standard_mags)
+
 
     
-    with numpyro.plate("data_j", n_sample_obs):
-        full_var_j = (sig_int**2. + sig_j**2.)**0.5
-        if f160w:
-            numpyro.sample("m_j", dist.Normal(loc=m_j,scale=full_var_j), obs=sample_mags)
-
-        else:
-            numpyro.sample("m_j", dist.StudentT(loc=m_j,df=nu,scale=full_var_j), obs=sample_mags)
-
-    n_standard_obs= len(standard_idx)
-
-    m_i = mag_inst_i[standard_idx]
-    with numpyro.plate("data_i", n_standard_obs):
-        full_var_i = (sig_int**2. + sig_i**2.)**0.5
-        if f160w:
-            numpyro.sample("m_i", dist.Normal(loc=m_i,scale=full_var_i), obs=standard_mags)
-
-        else:
-            numpyro.sample("m_i", dist.StudentT(loc=m_i,df=nu,scale=full_var_i), obs=standard_mags)
-
-
-
 
 
 
@@ -129,6 +130,10 @@ def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=Non
 mag_table,smags=get_data()
 
 result_table = OrderedDict()
+
+
+
+
     # drop some fields we do not need from the results
 derop_fields = ['hdi_3%','hdi_97%','mcse_mean','mcse_sd','ess_bulk','ess_tail','r_hat']
     # keep a track of all_objects
@@ -154,8 +159,19 @@ row_index =blank_table['obj_ID'] == 'nu'
 blank_table['F160W'][row_index]=np.nan
 blank_table['dF160W'][row_index]=np.nan
 
+print(mag_table)
+
+sample_names = np.array([])
+standard_names = np.array([])
+
+max_stand=0
+max_samp = 0
+
 
 for i, pb in enumerate(mag_table):
+
+
+
 
         all_mags = mag_table[pb]
         mask = all_mags['objID'].isin(use_stars)
@@ -170,88 +186,139 @@ for i, pb in enumerate(mag_table):
         # what are the unique stars
         standards  = standard_mags['objID'].unique()
 
-        nstandards = len(standards)
-        # map each standard star to an integer
-        standard_ind = list(range(nstandards))
-        standard_map = dict(zip(standards, standard_ind))
-        index_standards = {value:key for key, value in standard_map.items()}
-        print(index_standards, "Standards")
-        # construct an index with the integer mapping for each star in the table
-        standard_idx = [standard_map[x] for x in standard_mags['objID']]
-        standard_mags['idx'] = standard_idx
-        standard_idx = standard_mags['idx'].values
-        print(standard_mags[ref])
-        #standard_cycle_idx = standard_mags['cycle'].values
+        standard_names= np.unique(np.append(standard_names,standards))
 
-        # get the apparent magnitude corresponding to each standard measurement
-        mag_app_i  = np.array([smags.loc[x.replace('-','').lower(), pb] for x in standards])
-        # the zeropoint guess is just the average difference of the apparent mags and the instrumental mags
-        zpt_est = np.average(mag_app_i[standard_idx] - standard_mags[ref])
-        print('Initial Guess Zeropoint {} : {:.4f}'.format(pb, zpt_est))
+  
 
         samples  = sample_mags['objID'].unique()
-        all_objects.update(samples)
-        nsamples = len(samples)
-        sample_ind = range(nsamples)
-        sample_map = dict(zip(samples, sample_ind))
-        print(sample_map)
-        index_sample = {value:key for key, value in sample_map.items()}
-        print(index_sample, "sample")
-        sample_idx = [sample_map[x] for x in sample_mags['objID']]
-        sample_mags['idx'] = sample_idx
-        sample_idx = sample_mags['idx'].values
+
+        sample_names = np.unique(np.append(sample_names,samples))
+
+        max_stand = np.max([max_stand,len(standard_mags)])
+
+        max_samp= np.max([max_samp,len(sample_mags)])
 
 
-        init_strategy=init_to_sample()
-        nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True,init_strategy=init_strategy)
-        mcmc = MCMC(nuts_kernel, num_samples=5000, num_warmup=5000,num_chains=4)
-        rng_key = random.PRNGKey(0)
+
+
+samp_mags = np.zeros((6,max_samp))+1000
+samp_ids = np.zeros((6,max_samp)).astype(int)+1000
+samp_err = np.zeros((6,max_samp))+1000
+
+stand_mags = np.zeros((6,max_stand))+1000
+stand_ids = np.zeros((6,max_stand)).astype(int)+1000
+stand_err = np.zeros((6,max_stand))+1000
+
+nstandards = len(standard_names)
+standard_ind = list(range(nstandards))
+standard_map = dict(zip(standard_names, standard_ind))
+
+nsamples= len(sample_names)
+sample_ind = list(range(nsamples))
+sample_map = dict(zip(sample_names, sample_ind))
+
+index_standards = {value:key for key, value in standard_map.items()}
+index_samples = {value:key for key, value in sample_map.items()}
+
+true_mags = np.zeros((6,len(standard_names)))
+
+zpt_est= np.zeros(6)
+
+for i, pb in enumerate(mag_table):
+
+        all_mags = mag_table[pb]
+        mask = all_mags['objID'].isin(use_stars)
 
         
 
 
-        if pb == 'F160W':
+        sample_mags   = all_mags.copy()
 
-            mcmc.run(rng_key,jnp.asarray(sample_idx),jnp.asarray(standard_idx),mag_app_i=jnp.asarray(mag_app_i),sig_i=jnp.asarray(standard_mags[dref]),sig_j=jnp.asarray(sample_mags[dref]),sample_mags=jnp.asarray(sample_mags[ref]),standard_mags=jnp.asarray(standard_mags[ref]),zpt_est=zpt_est,f160w=True)
-
-        else:
-            mcmc.run(rng_key,jnp.asarray(sample_idx),jnp.asarray(standard_idx),mag_app_i=jnp.asarray(mag_app_i),sig_i=jnp.asarray(standard_mags[dref]),sig_j=jnp.asarray(sample_mags[dref]),sample_mags=jnp.asarray(sample_mags[ref]),standard_mags=jnp.asarray(standard_mags[ref]),zpt_est=zpt_est,f160w=False)
-
-        mcmc.print_summary()
-        samps=mcmc.get_samples()
+        standard_mags = all_mags[mask].copy()
 
 
-        keys = samps.keys()
+        stand_ids[i,:len(standard_mags)] = [standard_map[x] for x in standard_mags['objID']]
+        stand_mags[i,:len(standard_mags)] = standard_mags[ref]
+        stand_err[i,:len(standard_mags)] = standard_mags[dref]
 
-        print(keys)
 
-        for key in keys:
+        samp_ids[i,:len(sample_mags)]=[sample_map[x] for x in sample_mags['objID']]
+        samp_mags[i,:len(sample_mags)] = sample_mags[ref]
+        samp_err[i,:len(sample_mags)] = sample_mags[dref]
 
-            shape = samps[key].shape
-            if len(shape)>1:
-                for i in range(shape[1]):
 
-                    star_name=index_sample[i]
-                    if star_name[0]=='W':
-                        star_name=star_name[:star_name.rfind('-')]
+        true_mags[i,:]  = np.array([smags.loc[x.replace('-','').lower(), pb] for x in standard_names])
 
-                    star_name = star_name.replace('-', '').lower()
-                    if star_name.rfind('.') !=-1:
-                        star_name=star_name[:star_name.rfind('.')]
+        zpt_est[i] = np.average(true_mags[i,stand_ids[i,:len(standard_mags)]]-stand_mags[i,:len(standard_mags)])
+
+
+
+
+nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
+mcmc = MCMC(nuts_kernel, num_samples=1000, num_warmup=1000,num_chains=4)
+rng_key = random.PRNGKey(0)
+
+
+mcmc.run(rng_key,jnp.asarray(samp_ids),jnp.asarray(stand_ids),mag_app_i=jnp.asarray(true_mags),sig_i=jnp.asarray(stand_err),sig_j=jnp.asarray(samp_err),sample_mags=jnp.asarray(samp_mags),standard_mags=jnp.asarray(stand_mags),zpt_est=zpt_est)
+
+mcmc.print_summary()
+samps=mcmc.get_samples()
+
+
+mag_samps= samps['mag_app_j']
+mags=np.mean(mag_samps,axis=0).reshape(6,len(sample_names)+1).T[:len(sample_names),:]
+mags_err=np.std(mag_samps,axis=0).reshape(6,len(sample_names)+1).T[:len(sample_names),:]
+sig_int = np.mean(samps['sig_intrinsic'],axis=0)
+sig_int_err = np.mean(samps['sig_intrinsic'],axis=0)
+
+zp= np.mean(samps['zeropoint'],axis=0)
+zp_err= np.std(samps['zeropoint'],axis=0)
+
+nu= np.mean(samps['nu'],axis=0)
+nu_err= np.std(samps['nu'],axis=0)
+
+
+
+
+
+for i, name in enumerate(sample_names):
+
+
+    if name[0]=='W':
+        name=name[:name.rfind('-')]
+
+    name = name.replace('-', '').lower()
+    if name.rfind('.') !=-1:
+        name=name[:name.rfind('.')]
+
+
+    sample_names[i]=name
                     
 
-                    if star_name not in list(blank_table['obj_ID']):
-                        blank_table.add_row({'obj_ID': star_name})
+pbs = ['F160W','F275W','F336W','F475W','F625W','F775W']
 
-                    row_index =blank_table['obj_ID'] == star_name
-                    blank_table[pb][row_index] = np.mean(samps[key][:,i])
-                    blank_table['d'+pb][row_index] = np.std(samps[key][:,i])
+for i,pb in enumerate(pbs):
 
-            else:
-                row_index =blank_table['obj_ID'] == key
-                blank_table[pb][row_index] = np.mean(samps[key])
-                blank_table['d'+pb][row_index] = np.std(samps[key])
-            
+    blank_table[pb][0]= zp[i]
+    blank_table['d'+pb][0]= zp_err[i]
+
+    blank_table[pb][1]= sig_int[i]
+    blank_table['d'+pb][1]= sig_int_err[i]
+
+    blank_table[pb][2] = nu[i]
+    blank_table['d'+pb][2]= nu_err[i]
+
+    for j in range(len(sample_names)):
+
+        if sample_names[j] not in list(blank_table['obj_ID']):
+            blank_table.add_row({'obj_ID': sample_names[j]})
+
+        row_index =blank_table['obj_ID'] == sample_names[j]
+
+        blank_table[pb][row_index] = mags[j,i]
+        blank_table['d'+pb][row_index] = mags_err[j,i]
+
+                   
 
 cols = blank_table.colnames
 for c in cols:
@@ -259,7 +326,6 @@ for c in cols:
         blank_table[c].format = '%.6f'
 
 
+blank_table.write('vec_new_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
 
-
-blank_table.write('new_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
 

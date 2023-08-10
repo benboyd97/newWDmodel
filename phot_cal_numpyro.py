@@ -203,7 +203,7 @@ for i, pb in enumerate(mag_table):
 
 
         nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
-        mcmc = MCMC(nuts_kernel, num_samples=40000, num_warmup=20000,num_chains=4)
+        mcmc = MCMC(nuts_kernel, num_samples=1000, num_warmup=1000,num_chains=4)
         rng_key = random.PRNGKey(0)
 
 
