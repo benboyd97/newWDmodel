@@ -50,8 +50,7 @@ def get_data():
     all_mags[ref] -= 30.
     mask = (all_mags[dref] < 0.5) & (np.abs(all_mags[ref]) < 50) & (all_mags['EXPTIME'] >= mintime)
     nbad = len(all_mags[~mask])
-    print(all_mags[~mask])
-    print("Trimming {:n} bad observations".format(nbad))
+
     all_mags = all_mags[mask]
     all_mags.rename_column('OBJECT-NAME','objID')
     all_mags.rename_column('FILTER','pb')
@@ -70,7 +69,7 @@ def get_data():
 
 
 
-def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=None,standard_mags=None,zpt_est=24,f160w=False):
+def phot_cal_model_all_student(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=None,standard_mags=None,zpt_est=24,f160w=False):
     
     
     n_bands= mag_app_i.shape[0]
@@ -104,11 +103,13 @@ def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=Non
 
     m_j = mag_inst_j[jnp.arange(n_bands).astype(int)[:,None], sample_idx]
     mask = sample_idx!=1000
-    with numpyro.plate("data_j", n_sample_obs):
-        full_var_j = (sig_int_b.reshape(n_bands,1)**2.+sig_j**2.)**0.5
+    with numpyro.plate("data_k",n_sample_obs):
+        with numpyro.plate("data_j", n_bands):
+       
+            full_var_j = (sig_int_b.reshape(n_bands,1)**2.+sig_j**2.)**0.5
 
-        with numpyro.handlers.mask(mask=mask):
-            numpyro.sample("m_j", dist.StudentT(loc=m_j,df=nu_b.reshape(n_bands,1),scale=full_var_j), obs=sample_mags)
+            with numpyro.handlers.mask(mask=mask):
+                numpyro.sample("m_j", dist.StudentT(loc=m_j,df=nu_b.reshape(n_bands,1),scale=full_var_j), obs=sample_mags)
 
     n_standard_obs= standard_mags.shape[1]
 
@@ -116,12 +117,87 @@ def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=Non
 
 
     mask = standard_idx!=1000
-    with numpyro.plate("data_i", n_standard_obs):
-        full_var_i = (sig_int_b.reshape(n_bands,1)**2. + sig_i**2.)**0.5
-        with numpyro.handlers.mask(mask=mask):
-            numpyro.sample("m_i", dist.StudentT(loc=m_i,df=nu_b.reshape(n_bands,1),scale=full_var_i), obs=standard_mags)
+    with numpyro.plate("data_l",n_standard_obs):
+        with numpyro.plate("data_i", n_bands):
+            full_var_i = (sig_int_b.reshape(n_bands,1)**2. + sig_i**2.)**0.5
+            with numpyro.handlers.mask(mask=mask):
+                numpyro.sample("m_i", dist.StudentT(loc=m_i,df=nu_b.reshape(n_bands,1),scale=full_var_i), obs=standard_mags)
 
 
+def phot_cal_model(sample_idx,standard_idx,mag_app_i,sig_i,sig_j,sample_mags=None,standard_mags=None,zpt_est=24,f160w=False):
+    
+    
+
+    n_bands= mag_app_i.shape[0]
+
+
+    with numpyro.plate("plate_b", n_bands):
+
+        sig_int_b =  numpyro.sample("sig_intrinsic", dist.HalfCauchy(1))
+        zpt_b = numpyro.sample("zeropoint",dist.Normal(loc=zpt_est,scale=1))
+        
+        
+        nu_b = numpyro.sample("nu", dist.HalfCauchy(3))
+
+    
+    n_sample_obj= len(np.unique(sample_idx))
+
+
+    with numpyro.plate("plate_j", n_sample_obj*n_bands):
+        mag_app_j = numpyro.sample("mag_app_j", dist.Uniform(8,25)).reshape(n_bands,n_sample_obj)
+        mag_inst_j = mag_app_j - zpt_b.reshape(n_bands,1)
+
+
+    n_standard_obj= len(np.unique(standard_idx))
+
+    with numpyro.plate("plate_i", n_standard_obj):
+
+        mag_inst_i = mag_app_i - zpt_b.reshape(n_bands,1)
+
+
+    n_sample_obs= sample_mags.shape[1]
+
+    m_j = mag_inst_j[jnp.arange(n_bands).astype(int)[:,None], sample_idx]
+    mask = sample_idx!=1000
+
+
+
+    with numpyro.plate("data_j1",n_sample_obs):
+        with numpyro.plate("data_j2", n_bands-1):
+            full_var_j = (sig_int_b.reshape(n_bands,1)**2.+sig_j**2.)**0.5
+
+            with numpyro.handlers.mask(mask=mask[1:,:]):
+                numpyro.sample("m_j", dist.StudentT(loc=m_j[1:,:],df=nu_b[1:].reshape(n_bands-1,1),scale=full_var_j[1:,:]), obs=sample_mags[1:,:])
+
+    n_standard_obs= standard_mags.shape[1]
+
+    m_i = mag_inst_i[jnp.arange(n_bands).astype(int)[:,None], standard_idx]
+
+    mask = standard_idx!=1000
+    with numpyro.plate("data_i1", n_standard_obs):
+        with numpyro.plate("data_i2", n_bands-1):
+            full_var_i = (sig_int_b.reshape(n_bands,1)**2. + sig_i**2.)**0.5
+            with numpyro.handlers.mask(mask=mask[1:,:]):
+                numpyro.sample("m_i", dist.StudentT(loc=m_i[1:,:],df=nu_b[1:].reshape(n_bands-1,1),scale=full_var_i[1:,:]), obs=standard_mags[1:,:])
+
+    mask = sample_idx!=1000
+    with numpyro.plate("data_k1", n_sample_obs):
+        with numpyro.plate("data_k1", 1):
+            full_var_j = (sig_int_b.reshape(n_bands,1)**2.+sig_j**2.)**0.5
+
+            with numpyro.handlers.mask(mask=mask[:1,:]):
+                numpyro.sample("m_k", dist.Normal(loc=m_j[:1,:],scale=full_var_j[:1,:]), obs=sample_mags[:1,:])
+
+
+    mask = standard_idx!=1000
+    with numpyro.plate("data_l1", n_standard_obs):
+        with numpyro.plate("data_l2", 1):
+            full_var_i = (sig_int_b.reshape(n_bands,1)**2. + sig_i**2.)**0.5
+            with numpyro.handlers.mask(mask=mask[:1,:]):
+                numpyro.sample("m_l", dist.Normal(loc=m_i[:1,:],scale=full_var_i[:1,:]), obs=standard_mags[:1,:])
+
+
+    
     
 
 
@@ -159,7 +235,6 @@ row_index =blank_table['obj_ID'] == 'nu'
 blank_table['F160W'][row_index]=np.nan
 blank_table['dF160W'][row_index]=np.nan
 
-print(mag_table)
 
 sample_names = np.array([])
 standard_names = np.array([])
@@ -252,9 +327,13 @@ for i, pb in enumerate(mag_table):
         zpt_est[i] = np.average(true_mags[i,stand_ids[i,:len(standard_mags)]]-stand_mags[i,:len(standard_mags)])
 
 
+all_student=True
+if all_student:
+    nuts_kernel = NUTS(phot_cal_model_all_student,adapt_step_size=True)
 
+else:
+    nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
 
-nuts_kernel = NUTS(phot_cal_model,adapt_step_size=True)
 mcmc = MCMC(nuts_kernel, num_samples=1000, num_warmup=1000,num_chains=4)
 rng_key = random.PRNGKey(0)
 
@@ -305,8 +384,18 @@ for i,pb in enumerate(pbs):
     blank_table[pb][1]= sig_int[i]
     blank_table['d'+pb][1]= sig_int_err[i]
 
-    blank_table[pb][2] = nu[i]
-    blank_table['d'+pb][2]= nu_err[i]
+    if i==0:
+        if all_student:
+            blank_table[pb][2] = nu[i]
+            blank_table['d'+pb][2]= nu_err[i]
+
+        else:
+            blank_table[pb][2] = np.nan
+            blank_table['d'+pb][2]= np.nan
+
+    else:
+        blank_table[pb][2] = nu[i]
+        blank_table['d'+pb][2]= nu_err[i]
 
     for j in range(len(sample_names)):
 
@@ -325,7 +414,9 @@ for c in cols:
     if blank_table[c].dtype == np.float64:
         blank_table[c].format = '%.6f'
 
-
-blank_table.write('vec_new_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
+if all_student:
+    blank_table.write('vec_new_all_student_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
+else:
+     blank_table.write('vec_new_cal.dat',format='ascii.fixed_width',delimiter='  ',overwrite=True)
 
 
