@@ -12,7 +12,7 @@ from scipy.stats import linregress
 import pymc as pm
 import pandas as pd
 from collections import OrderedDict
-
+ 
 def main():
     suffix = '_abmag'
     ilaph_version = '5'
@@ -24,7 +24,7 @@ def main():
     marker    = ['o',      'd',     '*']       # markers to use for each standard in plots
     use_stars = ['GD-153', 'G191B2B', 'GD-71'] # what stars are to be used to get zeropoints
 
-    standard_mags_file = f'../calspec_standards_WFC3_UVIS2_IR_{magsys}.txt' # standard's apparent magnitudes in each band
+    standard_mags_file = f'/Users/bboyd/Documents/work/wd/WD_data/photometry/20181102/calspec_standards_WFC3_UVIS2_IR_{magsys}.txt' # standard's apparent magnitudes in each band
     smags = at.Table.read(standard_mags_file, format='ascii')
     smags = smags.to_pandas()
     smags.set_index('objID', inplace=True)
@@ -35,7 +35,7 @@ def main():
     drop_fields = ['X', 'Y', 'BCKGRMS', 'SKY', 'FITS-FILE']
 
     mag_table = OrderedDict() # stores combined magnitudes and zeropoints in each passband
-    all_mags   = at.Table.read('../src/AS/all+standardmeasures_C20_C22_ILAPHv{}_AS.txt'.format(ilaph_version), format='ascii')
+    all_mags   = at.Table.read('/Users/bboyd/Documents/work/wd/WD_data/photometry/20181102/src/AS/all+standardmeasures_C20_C22_ILAPHv{}_AS.txt'.format(ilaph_version), format='ascii')
     all_mags[ref] -= 30.
     mask = (all_mags[dref] < 0.5) & (np.abs(all_mags[ref]) < 50) & (all_mags['EXPTIME'] >= mintime)
     nbad = len(all_mags[~mask])
@@ -177,6 +177,8 @@ def main():
     if out is None:
         message = 'No data was processed in any filter for any objects'
         raise RuntimeError(message)
+
+    print(result_table)
 
     # sort the output rows
     sorter = var_names + sorted(list(all_objects))
